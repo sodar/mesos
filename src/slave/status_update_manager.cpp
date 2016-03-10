@@ -38,6 +38,7 @@
 
 #include "slave/constants.hpp"
 #include "slave/flags.hpp"
+#include "slave/hook_config.hpp"
 #include "slave/slave.hpp"
 #include "slave/state.hpp"
 #include "slave/status_update_manager.hpp"
@@ -145,6 +146,8 @@ private:
   function<void(StatusUpdate)> forward_;
 
   hashmap<FrameworkID, hashmap<TaskID, StatusUpdateStream*>> streams;
+
+  HookConfig hookConfig_;
 };
 
 
@@ -169,6 +172,7 @@ void StatusUpdateManagerProcess::initialize(
     const function<void(StatusUpdate)>& forward)
 {
   forward_ = forward;
+  hookConfig_.parse();
 }
 
 
@@ -321,6 +325,20 @@ Future<Nothing> StatusUpdateManagerProcess::_update(
   const FrameworkID& frameworkId = update.framework_id();
 
   LOG(INFO) << "Received status update " << update;
+
+  if (update.has_status() && update.status().has_state()) {
+    mesos::TaskState state = update.status().state();
+    Option<std::string> cmd = hookConfig_.prepareCommand(
+        state, taskId, frameworkId, containerId);
+    if (cmd.isSome()) {
+      Try<Subprocess> hookCmd = subprocess(cmd.get());
+      if (hookCmd.isError()) {
+        LOG(ERROR) << "Forking hook process failed: " << hookCmd.error();
+      } else {
+        hookCmd.get().status().discard();
+      }
+    }
+  }
 
   // Write the status update to disk and enqueue it to send it to the master.
   // Create/Get the status update stream for this task.

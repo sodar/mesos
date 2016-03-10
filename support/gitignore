@@ -33,3 +33,8 @@ missing
 .deps/
 .libs/
 *-stamp
+
+# eclipse
+.cproject
+.project
+.settings/

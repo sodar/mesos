@@ -350,6 +350,14 @@ if (NOT WIN32)
     slave/container_logger.cpp
     slave/container_loggers/sandbox.cpp
     slave/resource_estimator.cpp
+    slave/gc.cpp
+    slave/flags.cpp
+    slave/hook_config.cpp
+    slave/hook_config.hpp
+    slave/http.cpp
+    slave/monitor.cpp
+    slave/qos_controller.cpp
+    slave/qos_controllers/noop.cpp
     slave/slave.cpp
     slave/containerizer/docker.cpp
     slave/containerizer/mesos/mount.cpp
