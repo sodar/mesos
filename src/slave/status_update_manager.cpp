@@ -326,17 +326,14 @@ Future<Nothing> StatusUpdateManagerProcess::_update(
 
   LOG(INFO) << "Received status update " << update;
 
-  if (update.has_status() && update.status().has_state()) {
-    mesos::TaskState state = update.status().state();
-    Option<std::string> cmd = hookConfig_.prepareCommand(
-        state, taskId, frameworkId, containerId);
-    if (cmd.isSome()) {
-      Try<Subprocess> hookCmd = subprocess(cmd.get());
-      if (hookCmd.isError()) {
-        LOG(ERROR) << "Forking hook process failed: " << hookCmd.error();
-      } else {
-        hookCmd.get().status().discard();
-      }
+  Option<std::string> cmd = hookConfig_.prepareCommand(
+      update, taskId, frameworkId, containerId);
+  if (cmd.isSome()) {
+    Try<Subprocess> hookCmd = subprocess(cmd.get());
+    if (hookCmd.isError()) {
+      LOG(ERROR) << "Forking hook process failed: " << hookCmd.error();
+    } else {
+      hookCmd.get().status().discard();
     }
   }
 

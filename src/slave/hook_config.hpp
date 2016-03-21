@@ -20,6 +20,7 @@
 #include <unordered_map>
 
 #include "mesos/mesos.hpp"
+#include "messages/messages.hpp"
 
 #include <stout/option.hpp>
 
@@ -34,7 +35,7 @@ public:
 
   void parse();
   Option<std::string> prepareCommand(
-      TaskState state, const TaskID &task,
+      const StatusUpdate &update, const TaskID &task,
       const FrameworkID &framework, const Option<ContainerID> &container) const;
 
   static Option<TaskState> string_to_status(const std::string &str);

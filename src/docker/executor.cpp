@@ -134,12 +134,14 @@ public:
       status.set_message(
           "Attempted to run multiple tasks using a \"docker\" executor");
 
+      status.mutable_labels()->MergeFrom(task.labels());
       driver->sendStatusUpdate(status);
       return;
     }
 
     // Capture the TaskID.
     taskId = task.task_id();
+    this->task = task;
 
     // Capture the kill policy.
     if (task.has_kill_policy()) {
@@ -209,6 +211,7 @@ public:
 
             containerNetworkInfo = *networkInfo;
           }
+          status.mutable_labels()->MergeFrom(task.labels());
           driver->sendStatusUpdate(status);
         }
 
@@ -314,6 +317,7 @@ protected:
           containerNetworkInfo.get());
     }
 
+    status.mutable_labels()->MergeFrom(task.get().labels());
     driver.get()->sendStatusUpdate(status);
 
     if (initiateTaskKill) {
@@ -574,6 +578,7 @@ private:
   Owned<health::HealthChecker> checker;
   Option<NetworkInfo> containerNetworkInfo;
   Option<pid_t> containerPid;
+  Option<TaskInfo> task;
 };
 
 

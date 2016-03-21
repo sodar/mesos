@@ -20,6 +20,8 @@
 
 #include <fstream>
 
+#include <stout/json.hpp>
+
 
 namespace mesos {
 namespace internal {
@@ -102,70 +104,226 @@ void HookConfig::parse()
   fs.close();
 }
 
-std::string datetime_string()
+static std::string datetimeString()
 {
   time_t rawtime;
   struct tm *timeinfo;
   char buffer[80];
 
-  time (&rawtime);
+  time(&rawtime);
   timeinfo = localtime(&rawtime);
 
   strftime(buffer, 80, "%d-%m-%Y %I:%M:%S", timeinfo);
   return buffer;
 }
 
+template <typename T>
+static std::string getValue(const Option<T> &obj)
+{
+  if (obj.isSome() && obj.get().has_value()) {
+    return obj.get().value();
+  }
+  return "?";
+}
+
+template <typename T>
+static std::string getValue(const T &obj)
+{
+  if (obj.has_value()) {
+    return obj.value();
+  }
+  return "?";
+}
+
+static std::string getJsonValue(const std::string &str, const std::string &key)
+{
+  Try<JSON::Value> maybe_json = JSON::parse(str);
+  if (maybe_json.isError()) {
+    LOG(WARNING) << maybe_json.error();
+    return "?";
+  }
+  if (!maybe_json.get().is<JSON::Object>()) {
+    LOG(WARNING) << "Json is not an object.";
+    return "?";
+  }
+  const JSON::Object &obj = maybe_json.get().as<JSON::Object>();
+  auto result = obj.find<JSON::Value>(key);
+  if (result.isError()) {
+    LOG(WARNING) << result.error();
+    return "?";
+  }
+  if (result.isNone()) {
+    LOG(WARNING) << "No such nested label (" << key << ")";
+    return "?";
+  }
+  std::stringstream ss;
+  ss << result.get();
+  return ss.str();
+}
+
+static std::string getLabelValue(
+    const Labels &labels, const std::string &key, const std::string &nested)
+{
+  assert(!key.empty());
+
+  for (int i = 0; i < labels.labels_size(); ++i) {
+    if (labels.labels(i).key() == key) {
+      auto &value = labels.labels(i).value();
+      if (nested.empty()) {
+        return value;
+      }
+      return getJsonValue(value, nested);
+    }
+  }
+  return "?";
+}
+
 Option<std::string> HookConfig::prepareCommand(
-    TaskState state, const TaskID &task,
+    const StatusUpdate &update, const TaskID &task,
     const FrameworkID &framework, const Option<ContainerID> &container) const
 {
+  if (!update.has_status() || !update.status().has_state()) {
+    return None();
+  }
+  TaskState state = update.status().state();
   auto it = cmd_.find(state);
   if (it == cmd_.end()) {
     return None();
   }
+
+  const Labels &labels = update.status().labels();
   std::string cmd;
-  for (unsigned int i = 0; i < it->second.size(); ++i) {
-    if (it->second[i] != '\\') {
-      cmd += it->second[i];
-    } else {
-      ++i;
-      if (i == it->second.size()) {
-        break;
-      }
-      switch (it->second[i]) {
-      case 'T':
-        if (task.has_value()) {
-          cmd += task.value();
-        } else {
-          cmd += "<unknown task id>";
-        }
-        break;
-      case 'F':
-        if (framework.has_value()) {
-          cmd += framework.value();
-        } else {
-          cmd += "<unknown framework id>";
-        }
-        break;
-      case 'C':
-        if (container.isSome() && container.get().has_value()) {
-          cmd += container.get().value();
-        } else {
-          cmd += "<unknown container id>";
-        }
-        break;
-      case 'D':
-        cmd += datetime_string();
-        break;
-      case '\\':
-        cmd += '\\';
-        break;
-      default:
-        LOG(WARNING) << "Unexpected symbol \\"
-            << it->second[i] << " in hook command.";
+  const std::string &hook_cmd = it->second;
+  unsigned int pos = 0;
+  std::string label_key;
+  std::string nested_labels;
+  bool found_dot = false;
+
+  auto process_cmd = [&](
+      const std::unordered_map<char, std::function<bool()>> &callbacks,
+      std::function<bool(char)> default_callback) {
+    while (pos < hook_cmd.size()) {
+      int c = hook_cmd[pos];
+      ++pos;
+      bool cont = callbacks.count(c)
+          ? callbacks.at(c)()
+          : default_callback(c);
+      if (!cont) {
+        return;
       }
     }
-  }
+  };
+
+  // Callbacks for placeholders preceded by backslash
+  std::unordered_map<char, std::function<bool()>> slash_callbacks;
+  slash_callbacks['T'] = [&]() {
+    cmd += getValue(task);
+    return false;
+  };
+  slash_callbacks['F'] = [&]() {
+    cmd += getValue(framework);
+    return false;
+  };
+  slash_callbacks['C'] = [&]() {
+    cmd += getValue(container);
+    return false;
+  };
+  slash_callbacks['D'] = [&]() {
+    cmd += datetimeString();
+    return false;
+  };
+  slash_callbacks['\\'] = [&]() {
+    cmd += '\\';
+    return false;
+  };
+  slash_callbacks['{'] = [&]() {
+    cmd += '{';
+    return false;
+  };
+  auto slash_default_callback = [&](char c) {
+    LOG(WARNING) << "Unexpected symbol \\"
+        << c << " in hook command.";
+    return false;
+  };
+
+  // Callbacks for processing '\}' inside of braces
+  std::unordered_map<char, std::function<bool()>> brace_slash_callbacks;
+  brace_slash_callbacks['}'] = [&]() {
+    if (!found_dot) {
+      label_key += '}';
+    } else {
+      nested_labels += '}';
+    }
+    return false;
+  };
+  brace_slash_callbacks['.'] = [&]() {
+    if (!found_dot) {
+      label_key += '.';
+    } else {
+      nested_labels += "\\.";
+    }
+    return false;
+  };
+  auto brace_slash_default_callback = [&](char c) {
+    LOG(WARNING) << "Unexpected symbol \\"
+        << c << " inside of braces.";
+    return true;
+  };
+
+  // Callbacks for processing label name inside of braces
+  std::unordered_map<char, std::function<bool()>> brace_callbacks;
+  brace_callbacks['\\'] = [&]() {
+    if (pos == cmd.size()) {
+      LOG(WARNING) << "Unexpected '\' at the end of hook command.";
+      return false;
+    }
+    process_cmd(brace_slash_callbacks, brace_slash_default_callback);
+    return true;
+  };
+  brace_callbacks['}'] = [&]() {
+    found_dot = false;
+    return false;
+  };
+  brace_callbacks['.'] = [&]() {
+    if (found_dot) {
+      nested_labels += '.';
+    } else {
+      found_dot = true;
+    }
+    return true;
+  };
+  auto brace_default_callback = [&](char c) {
+    if (!found_dot) {
+      label_key += c;
+    } else {
+      nested_labels += c;
+    }
+    return true;
+  };
+
+  // Callbacks for special characters in hook command.
+  std::unordered_map<char, std::function<bool()>> main_callbacks;
+  main_callbacks['\\'] = [&]() {
+    if (pos == cmd.size()) {
+      LOG(WARNING) << "Unexpected '\' at the end of hook command.";
+      return false;
+    }
+    process_cmd(slash_callbacks, slash_default_callback);
+    return true;
+  };
+  main_callbacks['{'] = [&]() {
+    process_cmd(brace_callbacks, brace_default_callback);
+    cmd += getLabelValue(labels, label_key, nested_labels);
+    label_key.clear();
+    nested_labels.clear();
+    return true;
+  };
+  auto main_default_callback = [&](char c) {
+    cmd += c;
+    return true;
+  };
+
+  process_cmd(main_callbacks, main_default_callback);
   return cmd;
 }
 
